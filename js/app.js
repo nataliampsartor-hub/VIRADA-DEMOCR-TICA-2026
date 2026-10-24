@@ -48,6 +48,34 @@ function download(blob,name,msg){
   if(IN_CLAUDE){toast('Download indisponível nesta visualização.');return Promise.resolve()}
   var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1500);toast(msg||'Arquivo baixado');return Promise.resolve();
 }
+/* No celular a imagem vai direto para a galeria: o menu do aparelho recebe só o arquivo, sem texto,
+   e aí aparece "Salvar imagem" (iPhone) ou "Salvar"/Galeria/Fotos (Android). Texto junto esconde essa opção no iPhone. */
+var GAL=false;
+try{GAL=!IN_CLAUDE&&!!navigator.canShare&&(/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1))&&navigator.canShare({files:[new File([''],'t.png',{type:'image/png'})]})}catch(e){}
+/* o celular só abre o menu logo depois de um toque; se a geração demorou, o botão pede mais um toque com as imagens já prontas */
+var waiting=null;
+function holdForTap(files,btn,label,txt){waiting={btn:btn,files:files,label:label};btn.disabled=false;btn.textContent=txt;btn.classList.add('ready')}
+function dropWaiting(){if(!waiting)return;var w=waiting;waiting=null;w.btn.classList.remove('ready');w.btn.disabled=false;w.btn.textContent=w.label}
+function resumeSave(btn){
+  if(!waiting||waiting.btn!==btn)return false;
+  var w=waiting;waiting=null;btn.classList.remove('ready');btn.textContent=w.label;
+  toGallery(w.files,btn,w.label).catch(function(){toast('Não consegui abrir o menu de salvar.')});return true;
+}
+function restoreBtn(btn,t){if(btn&&!(waiting&&waiting.btn===btn)){btn.disabled=false;btn.textContent=t}}
+function toGallery(files,btn,label){
+  files=files.slice();var batch=[],size=0;
+  /* o Android aceita até 10 arquivos por vez */
+  while(files.length&&batch.length<10&&(!batch.length||size+files[0].size<45e6)){size+=files[0].size;batch.push(files.shift())}
+  return navigator.share({files:batch}).then(function(){
+    if(files.length&&btn)return holdForTap(files,btn,label,'Salvar as próximas '+files.length);
+    toast('Pronto!');
+  },function(e){
+    if(e&&e.name==='AbortError')return;
+    if(e&&e.name==='NotAllowedError'&&btn)return holdForTap(batch.concat(files),btn,label,'Pronto! Toque para salvar');
+    throw e;
+  });
+}
+function pngFile(b,name){return new File([b],name,{type:'image/png'})}
 
 /* ---------- modelos (tamanho real: largura 1080) ---------- */
 var R={};
@@ -255,10 +283,15 @@ function prerender(s){
 }
 function fname(s){return 'frente-democratica-'+s.tpl+'-'+s.fmt+'.png'}
 function savePng(s,btn){
+  if(btn&&resumeSave(btn))return;
   var t=btn&&btn.textContent;if(btn){btn.disabled=true;btn.textContent='Gerando…'}
-  return renderBlob(s).then(function(b){return download(b,fname(s),'PNG baixado ('+FM[s.fmt].w+'×'+FM[s.fmt].h+')')})
+  return renderBlob(s).then(function(b){
+      var msg='PNG baixado ('+FM[s.fmt].w+'×'+FM[s.fmt].h+')';
+      if(GAL)return toGallery([pngFile(b,fname(s))],btn,t).catch(function(){return download(b,fname(s),msg)});
+      return download(b,fname(s),msg);
+    })
     .catch(function(){toast('Não consegui gerar o PNG. Tente outro navegador.')})
-    .then(function(){if(btn){btn.disabled=false;btn.textContent=t}});
+    .then(function(){restoreBtn(btn,t)});
 }
 function sharePng(s,btn){
   var t=btn.textContent;btn.disabled=true;btn.textContent='Gerando…';
@@ -283,10 +316,18 @@ function renderGallery(){
     var cr=p.lic?('Foto: '+esc(p.autor)+' · '+esc(p.lic)):('Foto: '+esc(p.autor));
     return '<figure class="gi" data-f="'+p.f+'"><img loading="lazy" src="assets/fotos/mini/'+p.f+'" width="'+Math.round(p.w/p.h*400)+'" height="400" alt="'+esc(p.grupo)+'">'+
      '<div class="ov"><span class="cr">'+esc(p.grupo)+'<br>'+cr+'</span><span class="acts">'+
-     '<button class="btn yellow sm" data-dl="'+p.f+'">Baixar</button>'+
+     '<button class="btn yellow sm" data-dl="'+p.f+'">'+(GAL?'Salvar':'Baixar')+'</button>'+
      '<button class="btn ghost-w sm" data-use="'+p.f+'">Usar no modelo</button></span></div></figure>';
   }).join('');
   $('#galCount').textContent=list.length+' fotos';
+}
+function savePhoto(f,btn){
+  if(resumeSave(btn))return;
+  var t=btn.textContent;btn.disabled=true;
+  fetch('assets/fotos/'+f).then(function(r){if(!r.ok)throw new Error(r.status);return r.blob()}).then(function(bl){
+    if(GAL)return toGallery([new File([bl],f,{type:'image/jpeg'})],btn,t).catch(function(){return download(bl,f,'Foto baixada')});
+    return download(bl,f,'Foto baixada');
+  }).catch(function(){toast('Não consegui baixar a foto.')}).then(function(){restoreBtn(btn,t)});
 }
 function zipAll(btn){
   if(!window.JSZip){toast('Biblioteca de ZIP não carregou.');return}
@@ -343,6 +384,7 @@ function refresh(){
   var f=FM[S.fmt];$('#sizeinfo').textContent='PNG de '+f.w+' × '+f.h+' px, pronto para o '+(S.fmt==='story'?'Story, Reels ou TikTok':'feed')+'.';
   var ca=$('#capTxt');if(document.activeElement!==ca)ca.value=fullCaption(S);
   updCarThumb();
+  if(waiting&&waiting.btn===$('#png'))dropWaiting();
   schedulePre(900);
 }
 /* só adianta o PNG quando o editor está na tela */
@@ -396,20 +438,28 @@ function renderCarousels(){
   $('#cars').innerHTML=CARS.map(function(d){
     var st=d.fmt==='story';
     return '<article class="car"><div class="car-h"><div style="min-width:0"><span class="tag2">'+(st?'Sequência de stories':'Carrossel')+' · '+d.pages.length+' '+carWord(d.fmt,d.pages.length)+'</span><h3>'+esc(d.nome)+'</h3><p class="muted">'+esc(d.desc)+'</p></div>'+
-     '<div class="rowbtn" style="justify-content:flex-start"><button type="button" class="btn blue sm" data-car="'+d.id+'">Editar '+(st?'esta sequência':'este carrossel')+'</button><button type="button" class="btn sm" data-carzip="'+d.id+'">Baixar todas (ZIP)</button><button type="button" class="btn sm" data-carcap="'+d.id+'">Copiar legenda</button></div></div>'+
+     '<div class="rowbtn" style="justify-content:flex-start"><button type="button" class="btn blue sm" data-car="'+d.id+'">Editar '+(st?'esta sequência':'este carrossel')+'</button><button type="button" class="btn sm" data-carzip="'+d.id+'">'+ALL_LBL+'</button><button type="button" class="btn sm" data-carcap="'+d.id+'">Copiar legenda</button></div></div>'+
      stripHtml(d.pages,d.fmt,function(i){return 'data-car="'+d.id+'" data-pg="'+i+'" aria-label="Editar '+carWord(d.fmt,1)+' '+(i+1)+'"'})+'</article>';
   }).join('');
   $$('#cars .sp').forEach(function(b){var d=CARM[b.dataset.car];mount($('.thumb',b),carPageState(d,d.pages[+b.dataset.pg]))});
 }
+var ALL_LBL=GAL?'Salvar todas na galeria':'Baixar todas (ZIP)';
 function zipPages(pages,base,btn){
-  if(!window.JSZip){toast('Biblioteca de ZIP não carregou.');return}
-  var t=btn.textContent,z=new JSZip(),done=0;btn.disabled=true;btn.textContent='Gerando 0/'+pages.length;
+  if(resumeSave(btn))return;
+  if(!window.JSZip&&!GAL){toast('Biblioteca de ZIP não carregou.');return}
+  var t=btn.textContent,files=[],done=0;btn.disabled=true;btn.textContent='Gerando 0/'+pages.length;
+  function zip(){
+    var z=new JSZip();files.forEach(function(f){z.file(f.name,f)});
+    return z.generateAsync({type:'blob'}).then(function(b){return download(b,base+'.zip',pages.length+' imagens baixadas, na ordem de publicação')});
+  }
   /* as páginas são desenhadas em fila e comprimidas ao mesmo tempo */
   Promise.all(pages.map(function(pg,k){
-    return renderBlob(pg).then(function(b){z.file(base+'-'+(k<9?'0':'')+(k+1)+'.png',b);btn.textContent='Gerando '+(++done)+'/'+pages.length});
-  })).then(function(){return z.generateAsync({type:'blob'})})
-    .then(function(b){return download(b,base+'.zip',pages.length+' imagens baixadas, na ordem de publicação')})
-    .catch(function(){toast('Não consegui gerar as imagens. Tente outro navegador.')}).then(function(){btn.disabled=false;btn.textContent=t});
+    return renderBlob(pg).then(function(b){files[k]=pngFile(b,base+'-'+(k<9?'0':'')+(k+1)+'.png');btn.textContent='Gerando '+(++done)+'/'+pages.length});
+  })).then(function(){
+    /* na galeria as imagens entram na ordem de publicar; se o aparelho recusar, sai o ZIP */
+    if(GAL)return toGallery(files,btn,t).catch(function(){if(window.JSZip)return zip();throw new Error('zip')});
+    return zip();
+  }).catch(function(){toast('Não consegui gerar as imagens. Tente outro navegador.')}).then(function(){restoreBtn(btn,t)});
 }
 function openCarousel(id,pg){
   var d=CARM[id];CAR={id:id,d:d,pages:d.pages.map(function(p){return carPageState(d,p)}),idx:pg||0};
@@ -421,7 +471,7 @@ function renderCarBar(){
   var b=$('#carBar');if(!CAR){b.hidden=true;return}
   var st=CAR.pages[0].fmt==='story';b.hidden=false;
   b.innerHTML='<div class="cb-h"><div><span class="fl">Editando '+(st?'sequência de stories':'carrossel')+' · '+CAR.pages.length+' '+carWord(CAR.pages[0].fmt,CAR.pages.length)+'</span><b class="cb-n">'+esc(CAR.d.nome)+'</b></div>'+
-   '<div class="rowbtn" style="justify-content:flex-start"><button type="button" class="btn sm" id="cbDup">Duplicar '+carWord(CAR.pages[0].fmt,1)+'</button><button type="button" class="btn sm" id="cbDel"'+(CAR.pages.length<2?' disabled':'')+'>Remover '+carWord(CAR.pages[0].fmt,1)+'</button><button type="button" class="btn blue sm" id="cbZip">Baixar todas (ZIP)</button><button type="button" class="btn sm" id="cbExit">Sair do carrossel</button></div></div>'+
+   '<div class="rowbtn" style="justify-content:flex-start"><button type="button" class="btn sm" id="cbDup">Duplicar '+carWord(CAR.pages[0].fmt,1)+'</button><button type="button" class="btn sm" id="cbDel"'+(CAR.pages.length<2?' disabled':'')+'>Remover '+carWord(CAR.pages[0].fmt,1)+'</button><button type="button" class="btn blue sm" id="cbZip">'+ALL_LBL+'</button><button type="button" class="btn sm" id="cbExit">Sair do carrossel</button></div></div>'+
    stripHtml(CAR.pages,CAR.pages[0].fmt,function(i){return 'data-cbp="'+i+'" aria-pressed="'+(i===CAR.idx)+'"'}).replace('class="strip','id="cbStrip" class="strip')+
    '<p class="small muted" style="margin:0">Clique numa '+carWord(CAR.pages[0].fmt,1)+' para editar. Formato e legenda valem para todas.</p>';
   $$('#cbStrip .sp').forEach(function(x){mount($('.thumb',x),CAR.pages[+x.dataset.cbp])});
@@ -465,6 +515,7 @@ function renderDays(){
 function postState(p){var s=stateOf(p);s.cap=p.cap;s.tagsList=p.tags;return s}
 function openPost(id){
   var p=allPosts[id],s=postState(p),dlg=$('#dlg');
+  if(waiting&&waiting.btn===$('#dlgPng'))dropWaiting();
   $('#dlgTitle').textContent=p.title.replace(/\*/g,'').replace(/\n/g,' ');
   $('#dlgCap').textContent=buildCaption(p);
   $('#dlgTags').innerHTML=p.tags.map(function(t){return '<button class="chip'+(window.TAGS.army.some(function(a){return a.t===t})?' army':'')+'" data-copy="'+esc(t)+'">'+esc(t)+'</button>'}).join('');
@@ -500,6 +551,7 @@ function init(){
   $('#nFotos').textContent=P.length;$('#nModelos').textContent=TPL.filter(function(t){return !t.hidden}).length;
   var np=0;window.DAYS.forEach(function(d){np+=d.posts.length});$('#nPosts').textContent=np;
 
+  if(GAL){$('#png').textContent='Salvar na galeria';$('#dlgPng').textContent='Salvar na galeria';$$('.galHint').forEach(function(h){h.hidden=false})}
   renderGallery();renderTemplates();renderCarousels();renderDays();renderTags();updPicked();
   $('#nCars').textContent=CARS.length;
   $('#cars').addEventListener('click',function(e){
@@ -512,7 +564,7 @@ function init(){
 
   $$('#galFilters .fbtn').forEach(function(b){b.addEventListener('click',function(){galFilter=b.dataset.g;$$('#galFilters .fbtn').forEach(function(x){x.setAttribute('aria-pressed',x===b)});renderGallery()})});
   $('#zipAll').addEventListener('click',function(){zipAll(this)});
-  $('#gallery').addEventListener('click',function(e){var d=e.target.closest('[data-dl]');if(d){fetch('assets/fotos/'+d.dataset.dl).then(function(r){return r.blob()}).then(function(bl){return download(bl,d.dataset.dl,'Foto baixada')}).catch(function(){toast('Não consegui baixar a foto.')});return}var b=e.target.closest('[data-use]');if(b){S.photo=b.dataset.use;renderForm();refresh();$('#editor').scrollIntoView({behavior:'smooth'});toast('Foto aplicada no editor')}});
+  $('#gallery').addEventListener('click',function(e){var d=e.target.closest('[data-dl]');if(d){savePhoto(d.dataset.dl,d);return}var b=e.target.closest('[data-use]');if(b){S.photo=b.dataset.use;renderForm();refresh();$('#editor').scrollIntoView({behavior:'smooth'});toast('Foto aplicada no editor')}});
   $('#tgrid').addEventListener('click',function(e){var b=e.target.closest('[data-t]');if(b){loadIntoEditor(tplState(TPM[b.dataset.t]))}});
   $('#days').addEventListener('click',function(e){
     var o=e.target.closest('[data-open]'),ed=e.target.closest('[data-edit]'),th=e.target.closest('.thumb');
