@@ -226,13 +226,32 @@ function tplState(t){return stateOf(t.d,{tpl:t.id})}
 /* ---------- exportação ---------- */
 function exportHost(){var h=$('#exportHost');return h}
 function waitFonts(){return (document.fonts&&document.fonts.ready)?document.fonts.ready:Promise.resolve()}
-function renderBlob(s){
+/* Uma arte por vez no #exportHost; a compressão do PNG roda fora da página, então a próxima arte já pode ser desenhada. */
+var drawQ=Promise.resolve();
+function renderCanvas(s){
   var f=FM[s.fmt]||FM.feed,host=exportHost();
-  return waitFonts().then(function(){
+  var p=drawQ.then(waitFonts).then(function(){
     host.innerHTML='';var el=build(s);host.appendChild(el);
     if(!window.html2canvas)throw new Error('html2canvas');
-    return window.html2canvas(el,{scale:1,width:f.w,height:f.h,useCORS:true,backgroundColor:null,logging:false});
-  }).then(function(cv){return new Promise(function(r){cv.toBlob(r,'image/png')})});
+    /* o html2canvas copia a página inteira antes de desenhar; pular tudo o que não é a arte corta a maior parte do tempo */
+    return window.html2canvas(el,{scale:1,width:f.w,height:f.h,useCORS:true,backgroundColor:null,logging:false,
+      ignoreElements:function(n){return n.parentNode===document.body&&n!==host}});
+  });
+  drawQ=p.then(function(){host.innerHTML=''},function(){host.innerHTML=''});
+  return p;
+}
+function toPng(cv){return new Promise(function(r,j){cv.toBlob(function(b){b?r(b):j(new Error('png'))},'image/png')})}
+/* PNG já pronto: o editor gera a arte enquanto a pessoa lê a prévia, e o clique só baixa */
+var ready={key:'',p:null};
+function keyOf(s){return JSON.stringify([s.tpl,s.fmt,s.theme,s.photo,s.kicker,s.title,s.body,s.tag,s.credit])}
+function renderBlob(s){
+  var k=keyOf(s);if(ready.key===k&&ready.p)return ready.p;
+  return renderCanvas(s).then(toPng);
+}
+function prerender(s){
+  var k=keyOf(s);if(ready.key===k)return;
+  var p=renderCanvas(s).then(toPng);ready={key:k,p:p};
+  p.catch(function(){if(ready.p===p)ready={key:'',p:null}});
 }
 function fname(s){return 'frente-democratica-'+s.tpl+'-'+s.fmt+'.png'}
 function savePng(s,btn){
@@ -273,15 +292,20 @@ function zipAll(btn){
   if(!window.JSZip){toast('Biblioteca de ZIP não carregou.');return}
   var t=btn.textContent;btn.disabled=true;btn.textContent='Preparando…';
   var z=new JSZip(),credits=['CRÉDITOS DAS FOTOS · Frente Democrática','',''];
-  var i=0;
-  function next(){
-    if(i>=P.length){z.file('CREDITOS.txt',credits.join('\n'));return z.generateAsync({type:'blob'}).then(function(b){return download(b,'frente-democratica-fotos.zip','ZIP baixado')})}
-    var p=P[i++];btn.textContent='Preparando '+i+'/'+P.length;
-    return fetch('assets/fotos/'+p.f).then(function(r){return r.blob()}).then(function(b){
-      z.file(p.f,b);credits.push(p.f+' — '+p.grupo+' — '+p.autor+(p.lic?(' — '+p.lic+' — '+p.licUrl+' — '+p.fonte):''));
-    }).then(next);
+  var i=0,done=0;
+  P.forEach(function(p){credits.push(p.f+' — '+p.grupo+' — '+p.autor+(p.lic?(' — '+p.lic+' — '+p.licUrl+' — '+p.fonte):''))});
+  /* 6 downloads ao mesmo tempo em vez de um por vez */
+  function worker(){
+    if(i>=P.length)return Promise.resolve();
+    var p=P[i++];
+    return fetch('assets/fotos/'+p.f).then(function(r){if(!r.ok)throw new Error(r.status);return r.blob()}).then(function(b){
+      z.file(p.f,b);btn.textContent='Preparando '+(++done)+'/'+P.length;
+    }).then(worker);
   }
-  next().catch(function(){toast('Falha ao montar o ZIP')}).then(function(){btn.disabled=false;btn.textContent=t});
+  Promise.all([worker(),worker(),worker(),worker(),worker(),worker()]).then(function(){
+    z.file('CREDITOS.txt',credits.join('\n'));
+    return z.generateAsync({type:'blob'}).then(function(b){return download(b,'frente-democratica-fotos.zip','ZIP baixado')});
+  }).catch(function(){toast('Falha ao montar o ZIP')}).then(function(){btn.disabled=false;btn.textContent=t});
 }
 
 /* ---------- editor ---------- */
@@ -319,7 +343,11 @@ function refresh(){
   var f=FM[S.fmt];$('#sizeinfo').textContent='PNG de '+f.w+' × '+f.h+' px, pronto para o '+(S.fmt==='story'?'Story, Reels ou TikTok':'feed')+'.';
   var ca=$('#capTxt');if(document.activeElement!==ca)ca.value=fullCaption(S);
   updCarThumb();
+  schedulePre(900);
 }
+/* só adianta o PNG quando o editor está na tela */
+function schedulePre(ms){clearTimeout(schedulePre.t);schedulePre.t=setTimeout(function(){var r=$('#editor').getBoundingClientRect();if(r.bottom>0&&r.top<innerHeight)prerender(S)},ms)}
+window.addEventListener('scroll',function(){schedulePre(600)},{passive:true});
 function shrink(file){return new Promise(function(res,rej){var u=URL.createObjectURL(file),im=new Image();im.onload=function(){var k=Math.min(1,1600/Math.max(im.naturalWidth,im.naturalHeight)),c=document.createElement('canvas');c.width=Math.round(im.naturalWidth*k);c.height=Math.round(im.naturalHeight*k);c.getContext('2d').drawImage(im,0,0,c.width,c.height);URL.revokeObjectURL(u);res(c.toDataURL('image/jpeg',.86))};im.onerror=function(){URL.revokeObjectURL(u);rej()};im.src=u})}
 function loadIntoEditor(st,scroll){
   exitCarousel();
@@ -375,13 +403,13 @@ function renderCarousels(){
 }
 function zipPages(pages,base,btn){
   if(!window.JSZip){toast('Biblioteca de ZIP não carregou.');return}
-  var t=btn.textContent,z=new JSZip(),i=0;btn.disabled=true;
-  function next(){
-    if(i>=pages.length)return z.generateAsync({type:'blob'}).then(function(b){return download(b,base+'.zip',pages.length+' imagens baixadas, na ordem de publicação')});
-    var k=i++;btn.textContent='Gerando '+(k+1)+'/'+pages.length;
-    return renderBlob(pages[k]).then(function(b){z.file(base+'-'+(k<9?'0':'')+(k+1)+'.png',b)}).then(next);
-  }
-  next().catch(function(){toast('Não consegui gerar as imagens. Tente outro navegador.')}).then(function(){btn.disabled=false;btn.textContent=t});
+  var t=btn.textContent,z=new JSZip(),done=0;btn.disabled=true;btn.textContent='Gerando 0/'+pages.length;
+  /* as páginas são desenhadas em fila e comprimidas ao mesmo tempo */
+  Promise.all(pages.map(function(pg,k){
+    return renderBlob(pg).then(function(b){z.file(base+'-'+(k<9?'0':'')+(k+1)+'.png',b);btn.textContent='Gerando '+(++done)+'/'+pages.length});
+  })).then(function(){return z.generateAsync({type:'blob'})})
+    .then(function(b){return download(b,base+'.zip',pages.length+' imagens baixadas, na ordem de publicação')})
+    .catch(function(){toast('Não consegui gerar as imagens. Tente outro navegador.')}).then(function(){btn.disabled=false;btn.textContent=t});
 }
 function openCarousel(id,pg){
   var d=CARM[id];CAR={id:id,d:d,pages:d.pages.map(function(p){return carPageState(d,p)}),idx:pg||0};
@@ -444,7 +472,7 @@ function openPost(id){
   $('#dlgCopy').onclick=function(){copy(buildCaption(p),'Legenda copiada!')};
   $('#dlgPng').onclick=function(){savePng(s,this)};
   $('#dlgEdit').onclick=function(){dlg.close();loadIntoEditor(s)};
-  dlg.showModal();requestAnimationFrame(function(){mount($('#dlgPv'),s)});
+  dlg.showModal();requestAnimationFrame(function(){mount($('#dlgPv'),s)});setTimeout(function(){if(dlg.open)prerender(s)},350);
 }
 
 /* ---------- hashtags ---------- */
