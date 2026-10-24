@@ -58,6 +58,9 @@ p{margin:0}
 .btn.ghost-w{border-color:#fff;color:#fff}.btn.ghost-w:hover{background:#fff;color:var(--red)}
 .btn.sm{padding:7px 14px;font-size:11px}
 .btn[disabled]{opacity:.5;cursor:default}
+.btn.ready,.btn.ready:hover{background:var(--green-dk)!important;border-color:var(--green-dk)!important;color:#fff!important;animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{transform:scale(1.04)}}
+@media (prefers-reduced-motion:reduce){.btn.ready{animation:none}}
 .collage{display:grid;grid-template-columns:repeat(6,1fr);grid-template-rows:repeat(2,minmax(0,1fr));gap:10px;align-self:stretch;min-height:340px;padding-bottom:0}
 .collage div{background:#00000022 center/cover no-repeat;border-radius:14px 14px 0 0}
 .collage div:nth-child(1){grid-column:1/4;grid-row:1/3}.collage div:nth-child(2){grid-column:4/7;grid-row:1/2;border-radius:14px}.collage div:nth-child(3){grid-column:4/6;grid-row:2/3}.collage div:nth-child(4){grid-column:6/7;grid-row:2/3}
